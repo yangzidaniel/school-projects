@@ -1,0 +1,507 @@
+---
+title: "Regression Analysis of Energy Efficiency in Residential Buildings"
+author: "Daniel Yang, Sharon Yang"
+date: "December 04, 2018"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+header-includes:
+  \usepackage{caption}
+bibliography: 429-references.bib
+
+abstract: "Among the interests of producers and tenants regarding residential buildings are that of energy efficiency - the amount of energy required to heat or cool a building unit to an acceptable level. This performance detail is relevant throughout the sales process, from meeting building regulations to long term utility pricing. To explore the factors that contribute to energy efficiency (which industry refers to as 'heating load' and 'cooling load'), we use data from Xifara and Tsanas [*Energy and Buildings*, Vol. 49, pp. 560-567, 2012]; namely, data involving compactness, surface area, wall area, roof area, height, orientation, and glazing area. We suspect these variables all affect energy efficiency. By constructing several regression models and employing a variety of analysis methods (Variable Selection, LASSO, Re-sampling, Regression Trees and Random Forest), we find that a log-transformed model including compactness, surface area, wall area, height, and glazing area to offer the most with respect to the aforementioned criteria, and that compactness and surface area are the most significant factors. These variables should therefore be first considered by prospective builders and tenants. We relax some regression assumptions and other variables (particularly that residential buildings are constructed in Greece) are unstated but controlled - limiting our conclusions to areas with similar climate."
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+getwd()
+```
+```{r results='hide', message=FALSE, warning=FALSE, echo=FALSE}
+library(tidyverse)
+library(car)
+library(leaps)
+library(glmnet)
+library(tree)
+library(randomForest)
+library(reshape2)
+library(ggfortify)
+library(GGally)
+library(gridExtra)
+```
+#Introduction
+
+##Background
+
+Energy efficiency has always been a point of interest for consumers and producers. The associated cost of owning, renting, or supplying a residential building all involve power, and so increasing energy efficiency would translate to non-trivial savings, among other conscious decisions such as minimizing carbon footprint. Having established a suitable motive for studying this topic, an appropriate data set is considered. In their paper, Xifara and Tsanas [-@tsanas2012accurate] simulates residential buildings with various properties, and reports the estimated heating and cooling loads for each simulation. The heating and cooling loads refers to the amount of heat energy added or removed to maintain an acceptable temperature respectively. A lower heating or cooling load is therefore an indication of a more energy efficient building.  
+
+The goal of this report is focused on establishing the relationships of the predictors with respect to heating load in the data set. The validity of the relationships are then assessed via the predictive power of the models that are based on those relationships. A variety of different methods are constructed and the findings are reported. Since the emphasis is on the more physical properties of a residential building, plausible effects on energy efficiency such as temperature and building materials are controlled. Additionally, the simulated buildings are based in Greece, perhaps limiting the inferential scope of the findings to similar climates. Nonetheless, the results generally agree with statistical and scientific literature. This offers consumers and producers a relatively accurate, if imprecise, rule of thumb in estimating energy efficiency in a residential building.  
+
+##Variables
+
+As previously mentioned, heating and cooling loads describe the amount of heat energy necessary to maintain reasonable indoor temperatures. While not explicitly detailed in the data set, these values appear to be measured in British thermal units, or BTU. Relative compactness refers to the ratios of a considered shape of the building to the reference shape, since to compare the surface to volume ratio ratio of different shapes, the volumes must be equal. A paper by Geletka and Sedlakova [-@geletka2012shape] succinctly expresses this quantity as 
+$$RC = \frac{(V/A)_{building}}{(V/A)_{ref}}$$
+Where $\frac{V}{A}$ refers to the ratio of volume to surface area. Since relative compactness is a ratio (of ratios), it does not have a unit. Surface area, wall area, roof area, are fairly self explanatory, referring to the areas that define and enclose the building, and specific areas that are known as 'walls' and 'roofs' respectively. These variables are measured in $m^2$. Overall height measures the length of the building and is measured in $m$. Orientation refers to the cardinal direction of which the building is facing. Glazing area and glazing area distribution are two related but distinct variables; glazing area refers to the % of glaze covering a floor area, whilst glazing area distribution describes which cardinal direction the glaze is concentrated in (about 55%). For reference, glazing in this context refers to "A covering of transparent or translucent material (typically glass or plastic) used for admitting light." (Glossary of Energy Terms, 2016)[-@glossary] A table is constructed denoting the variable types:
+
+\begin{center}
+\captionof{table}{Variable types within the data set}
+\begin{tabular}{|l|l|}
+\hline
+Variable name             & Variable type \\ \hline
+Heating Load              & Continuous    \\ \hline
+Cooling Load              & Continuous    \\ \hline
+Relative Compactness      & Continuous    \\ \hline
+Surface Area              & Continuous    \\ \hline
+Wall Area                 & Continuous    \\ \hline
+Roof Area                 & Continuous    \\ \hline
+Overall Height            & Ordinal       \\ \hline
+Orientation               & Categorical   \\ \hline
+Glazing Area              & Ordinal       \\ \hline
+Glazing Area Distribution & Categorical   \\ \hline
+\end{tabular}
+\end{center}
+
+Some justification and explanations may be required. Orientation is categorical and is encoded to take 4 different values: 2, 3, 4, and 5. Although the amount of values matches the amount of directions, it is not mentioned in the data set description which number associates to which cardinal direction. Overall height may be rightfully interpreted as continuous, however in this data set only takes upon 2 values; it may better suit the needs of analysis for it to be classified as ordinal. Glazing area takes on values of 0, 0.1, 0.25, and 0.4, which indicate percentages. While not continuous nor discrete, there is certainly an ordering to it. Glazing area distribution is clearly categorical. The corresponding directions to the values 0, 1, 2, 3, 4, and 5 are uniform (glazing area evenly distributed), north, east, south, and west. 
+
+##The Dataset
+
+The data set will be briefly described here. Below is the constructed tibble of the *energy.csv* datafile used in this report:
+```{r, echo = FALSE}
+energy = read.csv("energy.csv", header = T)
+energy = subset(energy, select = -c(X,X.1))
+energy = na.omit(energy)
+names(energy) = c("RC", "SA", "WA", "RA", "OH", "O", "GA", "GAD", "HL", "CL")
+energy = as_tibble(energy)
+energy
+```
+This tibble slightly differs from the original data set as it omits missing entries and abbreviates the names of the variables. These abbreviations logically match the variables described earlier. Note that the variable data type and sample size are also included in the tibble.
+
+As previously mentioned, orientation and glazing area distributions are categorical variables unsuited for quantitative interpretation. Overall height and glazing area, while quantitative in nature, more closely relates to ordinal variables as height dichotomizes the data set into 2 distinct groups and glazing area is reported in percentages.  To address these problems, they are factored in R as dummy variables (with height and glazing area being ordered):
+
+```{r}
+OH.F = factor(energy$OH, ordered = T)
+GA.F = factor(energy$GA, ordered = T)
+GAD.F = as.factor(energy$GAD)
+O.F = as.factor(energy$O)
+```
+Our updated data set can now be represented as
+```{r, echo = FALSE}
+energy = add_column(energy, OH.F, GA.F, GAD.F, O.F) 
+energy = select(energy,-OH, -O, -GA, -GAD, -CL)
+energy
+```
+
+As *CL* is not considered in the project, it is removed. 
+
+#Methods
+
+##Visualising data
+
+The data set is first visualised to get some preliminary sense of how the predictors are distributed. Using the ggplot2 package in R, the relevant plots are constructed on the next page:
+
+```{r, echo = FALSE, fig.height = 8}
+v1 = ggplot(energy, aes(x = OH.F, y = HL, fill = OH.F)) +
+  geom_violin(scale = "area") +
+  geom_boxplot(width = 0.1) +
+  labs(title = "Violin plots for Overall Height") 
+
+v2 = ggplot(energy, aes(x = O.F, y = HL, fill = O.F)) +
+  geom_violin(scale = "area") +
+  geom_boxplot(width = 0.1) +
+  labs(title ="Violin plots for Orientation") 
+
+v3 = ggplot(energy, aes(x = GA.F, y = HL, fill = GA.F)) +
+  geom_violin(scale = "area") +
+  geom_boxplot(width = 0.1) +
+  labs(title = "Violin plots for Glazing Area") 
+
+v4 = ggplot(energy, aes(x = GAD.F, y = HL, fill = GAD.F)) +
+  geom_violin(scale = "area") +
+  geom_boxplot(width = 0.1) +
+  labs(title = "Violin plots for GAD") 
+
+s1 = ggplot(energy, aes(x = RC, y = HL)) +
+  geom_jitter() +
+  labs(title = "scatterplot for RC")
+
+s2 = ggplot(energy, aes(x = SA, y = HL)) +
+  geom_jitter() +
+  labs(title = "scatterplot for SA")
+
+s3 = ggplot(energy, aes(x = WA, y = HL)) +
+  geom_jitter() +
+  labs(title = "scatterplot for WA")
+
+s4 = ggplot(energy, aes(x = RA, y = HL)) +
+  geom_jitter() +
+  labs(title = "scatterplot for RA")
+
+grid.arrange(arrangeGrob(v1,v2,v3,v4, nrow = 2), arrangeGrob(s1,s2,s3,s4, nrow = 2))
+
+```
+
+Violin plots were chosen for discrete predictors and scatter plots for continuous predictors. From the visualisations, it is observed that among the factored variables most of the violin plots are bimodally distributed, although the embedded boxplots indicate symmetry. Additionally, there's a clear upwards trend in the glazing area plot, which suggests a positive correlation between glazing area percentages that cover a residential building and heating load. Since orientation and most of the glazing area distribution violin plots maintain the same median, it raises questions to be verified if they are significant. Among the continuous predictors, the scatterplots seem to be clearly separated into two distinct groups, with marginal linear relations. The similarities in the scatterplot patterns also suggest high collinearity, although to be certain variance-inflation factors should be computed. Finally, the median and distribution of the violin plot for overall height makes it evident that a higher heat load corresponds to height. With only two levels, it may be worthwhile to investigate overall height as the potential reason behind the bimodal distributions and scatterplot groups.        
+
+##Multiple Linear Regression
+
+### Model 1
+
+It is befitting for the first model to be the simplest. This model contains all possible predictors. 
+```{r}
+model.1 = lm(HL ~ ., data = energy)
+summary(model.1)
+```
+An immediate problem is presented from the summary: The variables *RA* and *GAD.F5* do not have defined slopes. This is evidence of perfect multicollinearity - both *RA* and *GAD.F5* can be perfectly predicted by another variable. This is a critical issue, since an over-determined model does not have unique estimates. 
+
+### Model 2
+
+The second model drops the offending predictors:
+```{r}
+model.2 = lm(HL ~ RC + SA + WA + OH.F + GA.F + O.F, data = energy)
+summary(model.2)
+```
+
+No errors are present in the summary. Observe that the median is quite close to 0, and only orientation is statistically insignificant at $\alpha = 0.05$ (Glazing area distribution is also found to be statistically insignificant). Adjusted $R^{2}$ gives 0.9229, or 92.29% of the variation in heating load is explained in this model. Since no other problem is apparent at this stage, the diagnostic plots[^1], pairs plot, and variance-inflation factors are considered:
+
+
+```{r, echo = FALSE, fig.height=4}
+autoplot(model.2)
+pairs(HL~RC+SA+WA+OH.F+GA.F+O.F, data = energy)
+vif(model.2)
+
+```
+[^1]: The apparent mispelling error "Contanst Leverage" is an error created by the ggplot package; see https://cran.r-project.org/web/packages/ggfortify/vignettes/plot_lm.html for an example.
+
+It is almost depressingly apparent that this model is inadequate in satisfying any of the linear regression assumptions. From the residuals vs. fitted plot a funnel shape pattern emerges, indicating heteroskedasticity (nonequal variances in the response at different levels). The QQ plot is not linear, meaning the errors are not normally distributed. From the pairs plot there are no linear relationship between *HL* and any of the continuous predictors. Finally the variance-inflation factor gives off some spectacularly awful results, with only *GA.F* and *O.F* being below the value of 5; there is extreme collinearity among the rest of the predictors.
+
+### Model 3
+
+To improve upon the model, the Box-Cox power transformation is considered:
+```{r}
+summary(powerTransform(cbind(HL,RC,SA,WA)~1,data= energy))
+bcHL = (energy$HL)^0.33
+bcRC = (energy$RC)^-1.54
+bcSA = (energy$SA)^2
+bcWA = (energy$WA)^-0.5
+
+model.3 = lm(bcHL ~ bcRC + bcSA + bcWA + energy$OH.F + energy$GA.F + energy$O.F)
+summary(model.3)
+```
+
+### Model 4
+
+From the summary the estimated Box-Cox transformation has revealed an unintended consequence: the once statistically significant variables *RC* and *SA* are now statistically insignificant, likely due to the nature of their high collinearity. While it's possible that variable selection can correct this issue, the model would still suffer from lack of interpretability. The logarithm transformation is instead considered; in addition to being a logical transformation, it also reasonably easy to interpret.
+
+```{r}
+lnHL = log(energy$HL)
+lnRC = log(energy$RC)
+lnSA = log(energy$SA)
+lnWA = log(energy$WA)
+
+model.4 = lm(lnHL ~ lnRC + lnSA + lnWA + energy$OH.F + energy$GA.F + energy$O.F)
+summary(model.4)
+```
+
+Statistical significance is preserved and no errors are present in the summary. A lower median is observed in addition to a higher adjusted $R^2$ in comparison to model 2. Proceeding with the diagnostics, 
+
+```{r, echo = FALSE, fig.height = 4}
+autoplot(model.4)
+pairs(lnHL ~ lnRC + lnSA + lnWA + energy$OH.F + energy$GA.F + energy$O.F)
+vif(model.4)
+```
+
+While the residuals and QQ plots look noticeably better, the VIF has inflated to an order of magnitude higher than the untransformed model. However, note that neither *lnRC* nor *lnSA* are considered insignificant, so a common consequence with high collinearity appears to have been avoided. Unfortunately, it does not appear that the transformation resolved the linearity issues. The marginal model plot is now considered:
+
+```{r, echo = FALSE}
+mmp(model.4, main = "Marginal model plot for model 4")
+```
+
+The model fits the data reasonably well; insofar as prediction goes, this model would be adequate for the task. From these results this model is tenatively selected as the most valid model thus far.
+
+Recall from the violin plots that larger overall height corresponded to a much larger heating load. To check if there is a need to explore second order terms (e.g. interaction), marginal scatterplots are created and assessed.
+
+```{r, echo = FALSE}
+h1 = ggplot(energy, aes(x = RC, y = HL, color = OH.F))+
+  geom_point()+
+  geom_smooth(method = lm)+
+  labs(title = "Marginal plot of RC and HL")
+
+h2 = ggplot(energy, aes(x = SA, y = HL, color = OH.F))+
+  geom_point()+
+  geom_smooth(method = lm)+
+  labs(title = "Marginal plot of SA and HL")
+
+h3 = ggplot(energy, aes(x = WA, y = HL, color = OH.F))+
+  geom_point()+
+  geom_smooth(method = lm)+
+  labs(title = "Marginal plot of WA and HL")
+
+grid.arrange(h1,h2,h3, nrow = 2)
+
+```
+
+From the marginal scatterplots it is evident that the levels of overall height makes a difference in heating load. However, note that the slopes for each level appears to be the same. Since the relationship between the variables modelled in the marginal plots do not differ for different levels of *OH.F*, it stands to reason that the inclusion of interaction terms would only marginally improve the model. **Model 4 is therefore chosen for continued analysis.**
+
+
+## Variable Selection
+
+It is natural to check if it's possible that a simpler model exists that would still have the same strength of interpretation as a more complicated one. As this dataset has perfect collinearity issues, a reduction in variables featured in a model would be ideal. Both all possible subsets and stepwise subsets are considered:
+
+### All possible subsets
+
+A summary, plot of the BIC values and corresponding adjusted $R^2$ is produced for all possible subsets of model 4.
+
+```{r, echo = FALSE}
+rs = summary(regsubsets(lnHL ~ lnRC + lnSA + lnWA + OH.F +GA.F + O.F, data = energy))
+rs
+plot(rs$bic, xlab = "# of Parameters", ylab = "BIC value", main = "Values of BIC at each subset")
+rsq = c(rs$adjr2)
+parameters = c(1,2,3,4,5,6,7,8)
+d = cbind(parameters, rsq)
+colnames(d) = cbind("# of parameters", "adjusted R squared")
+d
+
+```
+
+The subset containing 7 variables is the best model, as it has the lowest BIC and highest adjusted $R^2$. To compare, the stepwise method is used:
+
+### Stepwise subsets
+```{r}
+backAIC = step(model.4, direction = "backward")
+backBIC = step(model.4, direction = "backward", k = log(nrow(energy)))
+```
+
+All methods agree on this new model being the best. Interestingly, despite the high collinearity present in the model, no reduction is advised. The only recommendation was to drop orientation, which was not significant in the first place. Nevertheless, the updated model is now  
+
+```{r}
+model.5 = lm(lnHL ~ lnRC + lnSA + lnWA + OH.F + GA.F, data = energy)
+```
+
+## Model Prediction
+
+To assess the predictive power of the model, the resampling method is used. Since the model involved transformations, it is necessary to use transformed data.
+```{r}
+logEnergy = as_tibble(cbind(lnHL, lnRC, lnSA, lnWA))
+logEnergy = logEnergy %>% mutate(energy$OH.F, energy$GA.F) 
+names(logEnergy) = c("lnHL", "lnRC", "lnSA", "lnWA", "OH.F", "GA.F")
+logEnergy
+
+```
+
+
+### Resampling 
+
+The dataset is split into a testing set and training set. The proportions chosen are 0.75 and 0.25 for the training set and the testing set, respectively.
+```{r}
+set.seed(0)
+trainingIndex = sample(1:nrow(logEnergy), 0.75*nrow(logEnergy))
+train = logEnergy[trainingIndex,]
+test = logEnergy[-trainingIndex,]
+trainedModel.5 = lm(lnHL ~ lnRC + lnSA + lnWA + OH.F + GA.F, data = train)
+predictModel.5 = predict(trainedModel.5, test)
+
+```
+
+The prediction plot is then visualised:
+
+```{r, echo = FALSE, warning= FALSE}
+actualPrediction = as_tibble(cbind(predictModel.5, test$lnHL))
+names(actualPrediction) = c("predictModel.5", "lnHL")
+ggplot(data = actualPrediction, aes(x = exp(predictModel.5), y = exp(lnHL)))+
+  geom_point()+
+  geom_smooth(model =lm, se = F)+
+  labs(title = "Prediction plot", x = "predicted values of HL", y = "Actual HL")
+```
+
+The plot seems to fit fairly well. Checking the correlation and MSE:
+
+```{r}
+cor(actualPrediction)
+mean((predictModel.5-test$lnHL)^2)
+```
+
+With high correlation and minimal MSE, model 5 has exceptional predictive power.
+
+## LASSO
+
+The LASSO method is conducted as an attempt to create a better model. To employ the LASSO method, a model matrix is created, with the intercept removed.
+```{r}
+set.seed(0)
+x = model.matrix(lnHL ~ ., data = logEnergy)[,-1]
+y = logEnergy$lnHL
+lambda = 10^seq(10,-2,length = 100)
+lasso.mod = glmnet(x[trainingIndex, ],y[trainingIndex],alpha = 1, lambda = lambda, family = "gaussian")
+plot(lasso.mod, main = "LASSO plot")
+
+```
+
+The LASSO plot shows complete divergence at 5 variables, which suggests that all 5 variables are important. Performing cross validation, the obtained plot and values are:
+
+```{r}
+cv.out = cv.glmnet(x[trainingIndex,],y[trainingIndex], alpha = 1)
+plot(cv.out, main = "Cross-validation MSE plot")
+bestLambda = cv.out$lambda.min
+lambdaSE = cv.out$lambda.1se
+bestLambda
+lambdaSE
+mean((predict(lasso.mod, s = bestLambda, newx = x[-trainingIndex,])-y[-trainingIndex])^2)
+mean((predict(lasso.mod, s = lambdaSE, newx = x[-trainingIndex,])-y[-trainingIndex])^2)
+mean((predict(lasso.mod, s = 0, newx = x[-trainingIndex,])-y[-trainingIndex])^2)
+```
+
+Interestingly, all $\lambda$ values produce the same mean. Since all $\lambda$ values are close to 0, the ordinary least squares approach is still the most ideal for carrying out the analysis. For completion's sake, the prediction plot is generated:
+
+```{r}
+out = glmnet(x,y, alpha = 1, lambda = lambda, family = "gaussian")
+lasso.coeff = predict(out, type = "coefficients", s = 0)
+lasso.coeff
+y.predicted = predict(out, s = 0, newx = x)
+plot(y,y.predicted, main = "Predicted values by LASSO")
+```
+
+The model created by LASSO also seems to have reasonable predictive power.
+
+## Regression Tree
+
+A regression tree is created to generate another model. In the context of this dataset, since the predictors are not linearly distributed, the regression tree may handle the non-linearity better than the other methods.
+
+```{r, echo = FALSE}
+tree.data = tree(lnHL ~ ., data = logEnergy)
+summary(tree.data)
+plot(tree.data, "Regression Tree plot")
+text(tree.data)
+```
+
+Note that since the data values are logged, the interpretation for each value would have to be exponentiated. Additionally, the model yields some surprising and non-intuitive results. For example, the regression tree classifies that, for values of *HL* which are $\sim e^{2.007}$, *SA* is over $e^{6.51269}$ and *GA* to be factor 0. In other words, a larger surface area corresponds to lower heating loads, contradicting analysis conducted earlier. A prediction plot is generated from this model to ascertain the predictive validity.
+
+```{r}
+tree.predict = predict(tree.data, newdata = logEnergy[-trainingIndex,]) 
+tree.test = as.matrix(logEnergy[-trainingIndex,"lnHL"])
+plot(tree.predict, tree.test, main = "Tree Regression Prediction plot", xlab = "predicted values by Tree Regression", ylab = "Actual values of lnHL")
+tree.mse = mean((tree.predict-tree.test)^2)
+tree.mse
+```
+
+The regression tree prediction plot and MSE is similar to previous analyses. Regardless, this model should be treated with deep skepticism - it is clear that larger surface area is associated with larger heating loads, and the logarithm function preserve monotonicity, so these results are nonsensical. Cross validation is plotted to check deviance, and the regression tree will undergo pruning to see if inference can be simplified.
+
+```{r, echo = FALSE}
+plot(cv.tree(tree.data)$size, cv.tree(tree.data)$dev, type = "b", xlab = "size", ylab = "deviance", main = "10-fold Cross Validation deviance plot")
+```
+
+The deviance sharply decreases with the inclusion of 2 predictors and tapers off with the inclusion of each additional predictor. Since the deviance reduction is marginal, the model is pruned at size equal to 4. Pruning the tree,
+
+```{r}
+tree.prune = prune.tree(tree.data, best = 4)
+summary(tree.prune)
+plot(tree.prune)
+text(tree.prune)
+```
+
+A simpler regression tree plot is produce. Evaluating the prediction plot,
+
+```{r}
+
+predict.prune = predict(tree.prune, newdata = logEnergy[-trainingIndex,])
+plot(predict.prune, tree.test, main = "Pruned Regression Prediction plot", xlab = "Pruned predicted values", ylab = "Actual values of lnHL")
+mean((predict.prune - tree.test)^2)
+``` 
+
+The pruned regression tree appears to have produced worse predictions and has a higher MSE than the original tree regression. In light of the already contentious findings from the original regression tree model, the pruned model is not particularly reliable or outstanding.
+
+
+## Random Forest
+
+A random forest is a method introduced to alleviate some of the problems that regression trees run into. Regression trees are highly sensitive to small changes in the data. Since the regression tree requires the dataset to be partitioned into a training and testing set, a different training set would yield vastly different results. A random forest is designed by sampling from the data set repeatedly (this is known as 'bootstrapping') to create a unique regression tree from each sampling, and then averaging the results. This corrects the overfitting tendency from regression trees while improving predictive power, at the cost of some bias and interpretation. As the number of trees increases, the lesser the error the random forest has. As observed,
+
+```{r}
+rf = randomForest(lnHL ~ ., data = logEnergy, importance = T)
+plot(rf, main = "Random forest plot")
+rf
+```
+
+A comparison in predictive power between the random forest and regression tree is found:
+
+```{r}
+set.seed(0)
+rf.predict = randomForest(lnHL ~ ., data = train)
+rf.mse = mean((predict(rf.predict, test)-tree.test)^2)
+c(rf = rf.mse, tree = tree.mse)
+```
+
+The random forest marginally beats the regression tree in predictive power.
+
+Variable importance (in the context of model prediction) can also be described through random forests. 
+
+```{r, echo = FALSE}
+varImpPlot(rf)
+```
+
+The random forest plot ranks *lnSA* and *lnRC*' to be the most important variables, while *GA.F* ranks among the least. It is still meaningful to note that high collinearity may have skewed the analysis. Since the random forest is difficult to interpret, no additional attempt has been made. 
+
+# Results
+
+The model that seems most adequate to address quantifiable statements with regards to heating load is model 5:
+```{r}
+summary(model.5)
+```
+
+The interpretation of each coefficient are as follows: On average, and holding all other predictors constant, per doubling of *RC*, *SA*, and *WA*, corresponds to a $2^{7.375}$, $2^{7.709}$, and $2^{0.779}$ times increase in *HL*, respectively. The ordinal factors are somewhat more difficult to interpret, but an attempt is given. The average change in *HL* as overall height goes from 3 to 7.5 is $e^{0.612}$, holding all predictors constant. For glazing area, at the baseline of 0%, the average change in *HL* as glazing area increases to 10%, 25%, and 40% is $e^{0.451}$, $e^{-0.138}$, and $e^{0.063}$, respectively. The reported adjusted *R* squared value is 0.957, meaning 95.7% of the variation in *lnHL* can be explained in this model. A low median value is reported. 
+
+Variable selection and model prediction were investigated to improve upon and test this model. In this respect, removing the non-significant variable *O.F* was recommended and carried out. LASSO, regression tree, and random forests were introduced to identify possible different models. Prediction plots for all methods (with the exception of the pruned regression tree) produced very similar results. While the LASSO corroborates with the original model as being the best (since $\lambda = 0$), the regression tree provides an intriguing but useless alternative. The random forest identifies *lnSA* and *lnRC* to be the most important variables and *GA.F* to be the least.
+
+# Discussion
+
+## Model Interpretation
+
+In modelling the variables that affect heating load, an individual relationship is found for each predictor. It can be observed that the orientation of the building and where the glaze area is distributed has no bearing on the heating load of the building. Relative compactness, surface area, wall area, and overall height all were positively correlated with larger heating load; this makes conceptual sense, as a larger building would naturally require additional energy to maintain acceptable temperature. Roof area was not considered significant in the model, but unlike orientation or glazing area distribution it can be perfectly computed with a combination of the previous variables mentioned. That means the non-significance is due to its perfect collinearity with some of the predictors, not that it had no relationship with heating load in of itself. Glazing area has the most surprising result - the relationship between the amount of glaze and heating load does not seem static. Compared at the 0% baseline, while the inclusion of glazing area increases heating load at 10% and 40%, it actually decreases at 20%, since $e^{-0.138} < 1$. This discrepancy is not so easily explainable; the sample size is reasonably large and the dataset was controlled from other outside factors. Additionally, as the dataset was simulated, the proportion of samples having different factors are the same. It could be possible that the relationship between glazing area and heating loads really do change depending on the amount of glaze, but that seems unlikely and would require deeper analysis.
+
+It seems natural to compare these results with the paper (Xifara and Tsanas, 2012) that this report is based on to ascertain the validity of the findings. Unfortunately, few properties are identical; outside of what was considered significant and the signs of the correlation, the actual quantitative estimates are all different. However, it is important to mention that the methodology carried out in the paper are in many ways different from the methods conducted here. The linear regression in the paper was applied through a method known as 'Iteratively reweighted least squares', and the classification random forest actually generated coefficients for each predictor. Furthermore, the inferential scope of this project is to establish the relationships of each variable with respect to heating load, which has been modestly accomplished. 
+
+A final point to discuss is how this ties into real life energy performance as a whole. The coefficient of determination and MSE all point to very promising results, but these results are after controlling for all other possible variables that could affect energy efficiency in simulated data. While it is still relatively clear that there is an association, the actual difference that physical properties makes may be over pronounced and would be lost in the noise of real world data. This is not entirely implausible, as col-linearity issues persist and mask the true estimated effect of each variable. 
+
+## Limitations
+
+George Box was recorded in saying that "all models are wrong, but some are useful". His profound wisdom will be apparent in this section.
+
+### Basic Assumptions
+
+The four assumptions that linear regression hinges on were all violated with varying degrees of severity (log transformation did resolve heteroskedasticity and non-normal errors). The most pressing concerns are that the continuous predictors (relative compactness, surface area, wall area, roof area) are not linearly distributed and the staggeringly high vif values indicating serious multicollinearity. These problems could not be remedied with any of the possible solutions, which perhaps illustrate the greater point that linear regression was not suitable as a method for this data set in the first place.  Regardless, the models examined all have substantial predictive power, so although it would be fair criticism to claim that the true relationships between the predictors and heating load have not been found, there are still some uses obtained in trying.    
+
+### Mis-classified variable significance
+
+The random forest generated in this project reported the most significant variables as surface area followed closely by relative compactness. These results does not match the results of the random forest obtained by Xifara and Tsanas. They report the most significant variable to be glazing area, for which they point out agrees with the existing literature regarding energy performance of buildings. In fact, it can be considered one of the primary goals of their work is to illustrate the advantages of non-linear methods, particularly in the case of multicollinear non-linear data. This makes the discrepancy of the random forest concerning, but since the scope is focused primarily on linear models, an ad-hoc solution did not feel necessary.   
+
+## Improvements
+
+Xifara and Tsanas(2012) recommend machine learning methods to handle this data set. This would drastically improve results, particularly since machine learning methods do not require the linearity assumption to be upheld. A very limited machine learning approach was actually implemented in this report; namely, the random forest. The random forest only made contributions to determining variable significance and as a proof-of-concept, since the technical depth required for full analysis was outside of the scope of this project. 
+
+Another possible direction (without involving machine learning) is multilevel regression. Multilevel (or hierarchical) regression involves modelling of parameters at more than one level. This would allow inference on variations between groups, rather than on a per-individual basis. Gelman and Hill [-@gelman2006data] recommends this approach for hierarchical resembling data. An example of how this would be implemented is by specifying the overall height as the group of interest, and proceeding with the multilevel regression. Due to the technical sophistication (this modelling mostly requires Bayesian methods) and the limited scope of the project, it was not chosen to be done, despite being perhaps the most logical approach.    
+
+# Conclusion
+
+In modelling the factors that affect energy efficiency, it is found that relative compactness, surface area, wall area, and overall height all correspond to higher heating loads. Orientation, glazing area distribution, and roof area are not found to be significant, and glazing area has mixed results. While not complete in satisfying the assumptions of a linear model, the model predictions are promising and model selection was cross examined in a variety of ways. Some shortcomings are discussed and model improvements are considered via machine learning and multilevel regression. For practical uses, builders and prospective tenants should prioritise smaller sizes of the building dimensions for a more energy efficient design.     
+
+
+# Appendix
+
+Below are the packages used for this project:
+```{r}
+library(tidyverse)
+library(car)
+library(leaps)
+library(glmnet)
+library(tree)
+library(randomForest)
+library(reshape2)
+library(ggfortify)
+library(GGally)
+library(gridExtra)
+```
+
+As this was written using R markdown, the actual R code involved in creating all results are scaffolded in the .rmd file.  
+
+# References
+
+
